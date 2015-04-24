@@ -107,11 +107,26 @@ module Etcd
       http.read_timeout = options[:timeout] || read_timeout
       setup_https(http)
       req.basic_auth(user_name, password) if [user_name, password].all?
-      Log.debug("Invoking: '#{req.class}' against '#{path}")
-      res = http.request(req)
-      Log.debug("Response code: #{res.code}")
-      Log.debug("Response body: #{res.body}")
-      process_http_request(res)
+      max_tries = 3
+      tries = 0
+      begin
+        Log.debug("Invoking: '#{req.class}' against '#{path}")
+        res = http.request(req)
+        Log.debug("Response code: #{res.code}")
+        Log.debug("Response body: #{res.body}")
+        process_http_request(res)
+      rescue Net::HTTPRetriableError
+        tries += 1
+        if tries >= max_tries
+          raise
+        else
+          if redirect_uri = URI(res["Location"])
+            http = Net::HTTP.new(redirect_uri.host, redirect_uri.port)
+          end
+          Log.debug("Retrying request... (#{tries}/#{max_tries})")
+          retry
+        end
+      end
     end
 
     def setup_https(http)
