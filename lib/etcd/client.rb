@@ -33,7 +33,8 @@ module Etcd
       :ca_file,
       :user_name,
       :password,
-      :ssl_cert
+      :ssl_cert,
+      :retries
     )
 
     def_delegators :@config, :use_ssl, :verify_mode, :read_timeout
@@ -63,6 +64,7 @@ module Etcd
       @config.ssl_cert = opts.key?(:ssl_cert) ? opts[:ssl_cert] : nil
       # Provide the key (content) and not just the filename here.
       @config.ssl_key = opts.key?(:ssl_key) ? opts[:ssl_key] : nil
+      @config.retries = opts[:retries] || 3
       yield @config if block_given?
     end
     # rubocop:enable CyclomaticComplexity
@@ -103,30 +105,39 @@ module Etcd
       else
         fail "Unknown http action: #{method}"
       end
-      http = Net::HTTP.new(host, port)
-      http.read_timeout = options[:timeout] || read_timeout
-      setup_https(http)
       req.basic_auth(user_name, password) if [user_name, password].all?
-      max_tries = 3
+      run_and_process_http_request(req, options)
+    end
+
+    def run_and_process_http_request(req, options={})
+      http = build_http_object(host, port, options)
       tries = 0
       begin
-        Log.debug("Invoking: '#{req.class}' against '#{path}")
+        Log.debug("Invoking: '#{req.class}' against '#{req.path}'")
         res = http.request(req)
         Log.debug("Response code: #{res.code}")
         Log.debug("Response body: #{res.body}")
         process_http_request(res)
       rescue Net::HTTPRetriableError
         tries += 1
-        if tries >= max_tries
+        if tries >= @config.retries
           raise
         else
-          if redirect_uri = URI(res["Location"])
-            http = Net::HTTP.new(redirect_uri.host, redirect_uri.port)
+          if res["Location"]
+            redirect_uri = URI(res["Location"])
+            http = build_http_object(redirect_uri.host, redirect_uri.port, options)
           end
-          Log.debug("Retrying request... (#{tries}/#{max_tries})")
+          Log.debug("Retrying request... (#{tries}/#{@config.retries})")
           retry
         end
       end
+    end
+
+    def build_http_object(host, port, options={})
+      http = Net::HTTP.new(host, port)
+      http.read_timeout = options[:timeout] || read_timeout
+      setup_https(http)
+      http
     end
 
     def setup_https(http)
@@ -146,7 +157,6 @@ module Etcd
       end
     end
 
-    # need to have original request to process the response when it redirects
     def process_http_request(res)
       case res
       when HTTP_SUCCESS
